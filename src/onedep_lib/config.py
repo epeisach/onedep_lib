@@ -52,6 +52,7 @@ class DepositConfig:
     hostname: str = "https://deposit.wwpdb.org/deposition"
     ssl_verify: bool = True
     redirect: bool = True
+    allowed_redirect_domain: str = "wwpdb.org"
     fetch_local_schema: bool = True
     local_schema_cache_dir: Path = field(default_factory=lambda: Path(__file__).parent / "schemas" / "json")
     schema_base_url: str = "https://schemas.wwpdb.org/nextdep"
@@ -113,7 +114,9 @@ class DepositConfig:
                     acc = entry.get("access_token")
                     ref = entry.get("refresh_token")
                     if acc is not None or ref is not None:
-                        if not isinstance(acc, str) or not isinstance(ref, str):
+                        if acc is not None and not isinstance(acc, str):
+                            raise ConfigError(f"Malformed token data in [auths.{fqdn_key}]")
+                        if not isinstance(ref, str):
                             raise ConfigError(f"Malformed token data in [auths.{fqdn_key}]")
                         merged["access_token"] = acc
                         merged["refresh_token"] = ref
@@ -147,6 +150,18 @@ class DepositConfig:
         if not isinstance(entry, dict):
             raise ConfigError(f"Malformed [auths.{key}] entry in config.toml")
         return entry
+
+    def read_auth_entries(self) -> dict[str, dict]:
+        data = self._read_toml()
+        auths = data.get("auths", {})
+        if not isinstance(auths, dict):
+            raise ConfigError("Malformed [auths] section in config.toml")
+        entries: dict[str, dict] = {}
+        for key, entry in auths.items():
+            if not isinstance(entry, dict):
+                raise ConfigError(f"Malformed [auths.{key}] entry in config.toml")
+            entries[key] = dict(entry)
+        return entries
 
     def write_auth_entry(self, key: str, entry: dict) -> None:
         data = self._read_toml()

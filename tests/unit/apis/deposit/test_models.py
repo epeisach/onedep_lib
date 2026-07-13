@@ -1,14 +1,13 @@
 from datetime import datetime
-import pytest
+
+from onedep_lib.apis.deposit.enums import Status
 from onedep_lib.apis.deposit.models import (
-    WwPDBDeposition,
-    DepositError,
     DepositedFile,
+    DepositError,
     DepositStatus,
     Experiment,
-    PixelSpacing,
+    WwPDBDeposition,
 )
-from onedep_lib.apis.deposit.enums import Status
 from onedep_lib.enums import ExperimentType, FileType
 
 

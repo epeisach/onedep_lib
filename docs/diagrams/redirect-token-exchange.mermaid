@@ -1,0 +1,28 @@
+---
+id: c865033c-8172-4f4e-b7ed-268ec973d0bc
+---
+sequenceDiagram
+    participant C as Client
+    participant D as Site D<br/>default site
+    participant R as Site R<br/>redirect site
+    participant CFG as Config<br/>auth entries
+
+    Note over C,CFG: Redirect when Site R has no local credentials
+    C->>CFG: Load default hostname and auth entries
+    C->>D: POST /api/v1/depositions/new<br/>Bearer Site D access token
+    D-->>C: invalid_location<br/>base_url = Site R
+
+    C->>C: Validate Site R URL<br/>allowed domain and HTTPS
+    C->>CFG: Lookup auths.site_r
+    CFG-->>C: No Site R refresh token
+    C->>CFG: Read current/default refresh token
+
+    C->>R: POST /auth/tokens/exchange<br/>{ refresh_token: Site D refresh token }
+    R->>R: Read source site id from token prefix
+    R->>D: Verify foreign refresh token<br/>server-to-server
+    D-->>R: Token valid for trusted user
+    R-->>C: Site R access token<br/>Site R refresh token
+
+    C->>CFG: Store returned tokens under auths.site_r
+    C->>R: POST /api/v1/depositions/new<br/>Bearer Site R access token
+    R-->>C: dep_id and site URLs

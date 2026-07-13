@@ -14,12 +14,15 @@ Follows the sequence diagram in docs/deposit.mermaid:
 from __future__ import annotations
 
 import logging
+import os
 import time
 
-import onedep_lib as dsp
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
+
+import onedep_lib as dsp
+from onedep_lib.config import DepositConfig
 
 logging.disable(logging.ERROR)
 
@@ -28,10 +31,10 @@ _console = Console(stderr=True)
 # ── Configuration ─────────────────────────────────────────────────────────────
 # Change all values marked with  <<<< CHANGE THIS  before running.
 
-EMAIL = "your.email@example.com"  # <<<< CHANGE THIS
-USERS = ["0000-0000-0000-0000"]  # <<<< CHANGE THIS  (ORCID iD)
-COORD_FILE = "/path/to/your/coord.cif"  # <<<< CHANGE THIS
-SF_FILE = "/path/to/your/sf.cif"  # <<<< CHANGE THIS
+EMAIL = os.getenv("WWPDB_EMAIL") or "your.email@example.com"
+USERS = os.getenv("WWPDB_USERS") and os.getenv("WWPDB_USERS").split(",") or ["0000-0000-0000-0000"]
+COORD_FILE = os.getenv("WWPDB_COORD_FILE") or "/path/to/your/coord.cif"
+SF_FILE = os.getenv("WWPDB_SF_FILE") or "/path/to/your/sf.cif"
 
 
 def ok(msg: str) -> None:
@@ -52,6 +55,8 @@ def print_report(label: str, report: dsp.CheckReport) -> None:
 
 
 def main() -> None:
+    config = DepositConfig.load()
+
     # ── 0. Validate configuration ─────────────────────────────────────────────
     _unset = [
         name
@@ -73,7 +78,7 @@ def main() -> None:
 
     with _console.status("[cyan]Initializing deposit…[/cyan]", spinner="dots") as spin:
         # ── 1. Initialization ────────────────────────────────────────────────
-        dep = dsp.deposit_init(email=EMAIL, users=USERS, country=dsp.Country.USA)
+        dep = dsp.deposit_init(email=EMAIL, users=USERS, country=dsp.Country.USA, config=config)
         ok(f"Deposit initialized  session_id={dep.session_id}")
 
         # ── 2. Set experiment type ────────────────────────────────────────────
@@ -83,7 +88,7 @@ def main() -> None:
 
         # ── 3. Check auth key ─────────────────────────────────────────────────
         spin.update("[cyan]Checking auth key…[/cyan]")
-        auth_ok = dep.check_auth_key()
+        auth_ok = dsp.check_auth_key(config=config)
         if auth_ok:
             ok("Auth key valid")
         else:
@@ -137,7 +142,7 @@ def main() -> None:
         spin.update("[cyan]Submitting deposit…[/cyan]")
         try:
             dep_id = dep.deposit()
-            ok(f"Deposit submitted  dep_id={dep_id}")
+            ok(f"Deposit submitted  dep_id={dep_id} url:{dep.site_url}")
         except (RuntimeError, dsp.DepositApiException) as exc:
             fail(f"deposit() failed: {exc}")
             return
@@ -161,3 +166,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

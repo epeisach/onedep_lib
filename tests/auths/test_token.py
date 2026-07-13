@@ -104,6 +104,57 @@ def test_get_access_token_refreshes_expired_token(tmp_path: Path, httpserver):
     assert store._read_entry()["refresh_token"] == "new-refresh"
 
 
+def test_get_access_token_refreshes_when_only_refresh_token_is_loaded(tmp_path: Path, httpserver):
+    config_file = tmp_path / "config.toml"
+    hostname = httpserver.url_for("/deposition").rstrip("/")
+    config_file.write_text(
+        "[default]\n"
+        f"hostname = \"{hostname}\"\n"
+        "ssl_verify = false\n"
+        "\n"
+        "[auths.localhost]\n"
+        "refresh_token = \"bootstrap-refresh\"\n"
+    )
+    fresh = _make_jwt(3600)
+    config = DepositConfig.load(config_path=config_file)
+    store = TokenStore(config=config)
+    httpserver.expect_request(
+        "/deposition/auth/tokens/refresh",
+        method="POST",
+        json={"refresh_token": "bootstrap-refresh"},
+    ).respond_with_json({"access_token": fresh, "refresh_token": "rotated-refresh"})
+
+    assert store.get_access_token() == fresh
+    assert store._read_entry() == {"access_token": fresh, "refresh_token": "rotated-refresh"}
+
+
+def test_get_access_token_observes_shared_config_after_another_store_refreshes(monkeypatch, config: DepositConfig):
+    stale_access = _make_jwt(-60)
+    fresh_access = _make_jwt(3600)
+    config.access_token = stale_access
+    config.refresh_token = "stale-refresh"
+    first_store = TokenStore(config)
+    second_store = TokenStore(config)
+    calls = []
+
+    def fake_post(url, json, verify, timeout):
+        calls.append({"url": url, "json": json, "verify": verify, "timeout": timeout})
+        return _TokenResponse(fresh_access, "fresh-refresh")
+
+    monkeypatch.setattr("onedep_lib.auths.token.requests.post", fake_post)
+
+    assert second_store.get_access_token() == fresh_access
+    assert first_store.get_access_token() == fresh_access
+    assert calls == [
+        {
+            "url": "https://deposit.wwpdb.org/deposition/auth/tokens/refresh",
+            "json": {"refresh_token": "stale-refresh"},
+            "verify": True,
+            "timeout": 30,
+        }
+    ]
+
+
 def test_refresh_401_explains_manual_token_required(tmp_path: Path, httpserver):
     config_file = tmp_path / "config.toml"
     config_file.write_text("[default]\n")
@@ -139,12 +190,116 @@ def test_revoke_posts_refresh_token_and_clears_local_storage(tmp_path: Path, htt
         json={"refresh_token": "refresh"},
     ).respond_with_data(status=204)
     store.revoke()
-    with pytest.raises(AuthError, match="No access token"):
+    with pytest.raises(AuthError, match="No refresh token stored. Paste a refresh token first."):
         store.get_access_token()
 
 
 def test_get_access_token_raises_auth_error_when_no_tokens_loaded(config: DepositConfig):
     store = TokenStore(config=config)
     # config was constructed directly (not via load()), so access_token is None
-    with pytest.raises(AuthError, match="No access token"):
+    with pytest.raises(AuthError, match="No refresh token stored. Paste a refresh token first."):
         store.get_access_token()
+
+
+class _TokenResponse:
+    status_code = 200
+
+    def __init__(self, access_token: str, refresh_token: str) -> None:
+        self._body = {"access_token": access_token, "refresh_token": refresh_token}
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, str]:
+        return self._body
+
+
+def test_activate_site_refreshes_existing_site_token(monkeypatch, tmp_path: Path):
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[default]\nhostname = "https://deposit.wwpdb.org/deposition"\n'
+        "[auths.deposit_wwpdb_org]\n"
+        f'access_token = "{_make_jwt(3600)}"\n'
+        'refresh_token = "default-refresh"\n'
+        "[auths.deposit_pdbe_wwpdb_org]\n"
+        f'access_token = "{_make_jwt(3600)}"\n'
+        'refresh_token = "pdbe-refresh"\n',
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_post(url, json, verify, timeout):
+        calls.append({"url": url, "json": json, "verify": verify, "timeout": timeout})
+        return _TokenResponse("pdbe-access-new", "pdbe-refresh-new")
+
+    monkeypatch.setattr("onedep_lib.auths.token.requests.post", fake_post)
+    store = TokenStore(DepositConfig.load(config_path=config_file))
+
+    assert store.activate_site("https://deposit-pdbe.wwpdb.org/deposition") == "pdbe-access-new"
+
+    assert calls == [
+        {
+            "url": "https://deposit-pdbe.wwpdb.org/deposition/auth/tokens/refresh",
+            "json": {"refresh_token": "pdbe-refresh"},
+            "verify": True,
+            "timeout": 30,
+        }
+    ]
+    assert store._read_entry() == {"access_token": "pdbe-access-new", "refresh_token": "pdbe-refresh-new"}
+    assert "pdbe-refresh-new" in config_file.read_text(encoding="utf-8")
+
+
+def test_activate_site_exchanges_current_token_when_site_key_missing(monkeypatch, tmp_path: Path):
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[default]\nhostname = "https://deposit.wwpdb.org/deposition"\n'
+        "[auths.deposit_wwpdb_org]\n"
+        f'access_token = "{_make_jwt(3600)}"\n'
+        'refresh_token = "default-refresh"\n',
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_post(url, json, verify, timeout):
+        calls.append({"url": url, "json": json, "verify": verify, "timeout": timeout})
+        return _TokenResponse("pdbe-access-new", "pdbe-refresh-new")
+
+    monkeypatch.setattr("onedep_lib.auths.token.requests.post", fake_post)
+    store = TokenStore(DepositConfig.load(config_path=config_file))
+
+    assert store.activate_site("https://deposit-pdbe.wwpdb.org/deposition") == "pdbe-access-new"
+
+    assert calls == [
+        {
+            "url": "https://deposit-pdbe.wwpdb.org/deposition/auth/tokens/exchange",
+            "json": {"refresh_token": "default-refresh"},
+            "verify": True,
+            "timeout": 30,
+        }
+    ]
+    text = config_file.read_text(encoding="utf-8")
+    assert "[auths.deposit_pdbe_wwpdb_org]" in text
+    assert 'refresh_token = "pdbe-refresh-new"' in text
+
+
+def test_activate_site_uses_existing_site_token_without_default_token(monkeypatch, tmp_path: Path):
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[default]\nhostname = "https://deposit.wwpdb.org/deposition"\n'
+        "[auths.deposit_pdbe_wwpdb_org]\n"
+        f'access_token = "{_make_jwt(3600)}"\n'
+        'refresh_token = "pdbe-refresh"\n',
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_post(url, json, verify, timeout):
+        calls.append({"url": url, "json": json, "verify": verify, "timeout": timeout})
+        return _TokenResponse("pdbe-access-new", "pdbe-refresh-new")
+
+    monkeypatch.setattr("onedep_lib.auths.token.requests.post", fake_post)
+    store = TokenStore(DepositConfig.load(config_path=config_file))
+
+    assert store.activate_site("https://deposit-pdbe.wwpdb.org/deposition") == "pdbe-access-new"
+
+    assert calls[0]["json"] == {"refresh_token": "pdbe-refresh"}

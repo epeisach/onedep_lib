@@ -1,12 +1,12 @@
 from typing import Union
+
 from onedep_lib.apis.deposit.models import (
-    WwPDBDeposition,
     DepositedFile,
     DepositError,
     DepositStatus,
-    Experiment,
+    WwPDBDeposition,
 )
-from onedep_lib.enums import Country, FileType
+from onedep_lib.enums import FileType
 
 
 def _stub_deposit(dep_id: str = "D_999", email: str = "test@example.com") -> WwPDBDeposition:
@@ -22,7 +22,31 @@ def _stub_deposit(dep_id: str = "D_999", email: str = "test@example.com") -> WwP
         last_login="2024-01-01T00:00:00",
         site="pdbe",
         status="DEP",
+        site_base_url="https://deposit-pdbe.wwpdb.org/deposition",
+        site_url="https://deposit-pdbe.wwpdb.org/deposition/D_999",
     )
+
+
+def test_wwpdb_deposition_preserves_positional_site_url_slot():
+    dep = WwPDBDeposition(
+        "D_999",
+        "test.com",
+        None,
+        None,
+        None,
+        "",
+        None,
+        "2024-01-01T00:00:00",
+        "2024-01-01T00:00:00",
+        "pdbe",
+        "DEP",
+        [],
+        [],
+        "https://example.org/view",
+    )
+
+    assert dep.site_url == "https://example.org/view"
+    assert dep.site_base_url is None
 
 
 def _stub_file(file_id: int = 1, file_type: FileType = FileType.MMCIF_COORD) -> DepositedFile:
@@ -86,8 +110,6 @@ class StubApiClient:
 
 
 def test_stub_api_client_is_structurally_compatible():
-    from onedep_lib.apis.deposit.types import ApiClient
-
     stub = StubApiClient()
     required = [
         "create_deposition",

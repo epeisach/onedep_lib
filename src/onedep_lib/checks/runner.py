@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections import Counter
-
 import jsonschema
+from referencing import Registry, Resource
+from referencing.jsonschema import DRAFT202012
 
 from onedep_lib.checks.report import CheckIssue, CheckReport, CheckSeverity
 from onedep_lib.enums import EMSubType, ExperimentType, FileType
@@ -10,68 +10,13 @@ from onedep_lib.exceptions import SchemaError
 from onedep_lib.schemas.types import SchemaProvider
 from onedep_lib.session.models import LocalFile
 
-_COORD_TYPES = {"co-pdb", "co-cif"}
-_SF_TYPES = {"xs-cif", "xs-mtz"}
-_EC_DATA_TYPES = {"vo-map", "xs-cif", "xs-mtz"}
-_NMR_UNIFIED_TYPES = {"nm-uni-nef", "nm-uni-str"}
-_NMR_RESTRAINT_TYPES = {
-    "nm-res-amb",
-    "nm-res-bio",
-    "nm-res-cha",
-    "nm-res-cns",
-    "nm-res-cya",
-    "nm-res-dyn",
-    "nm-res-gro",
-    "nm-res-isd",
-    "nm-res-ros",
-    "nm-res-syb",
-    "nm-res-xpl",
-    "nm-res-oth",
-}
-_HALF_MAP_SUBTYPES = {"single", "helical", "subtomogram"}
-
-
-def _human_readable_messages(
-    filetypes: list[str], experiment_type: ExperimentType, em_subtype: EMSubType | None
-) -> list[str]:
-    counts = Counter(filetypes)
-    present = set(filetypes)
-    messages: list[str] = []
-
-    if experiment_type != ExperimentType.EM and not present.intersection(_COORD_TYPES):
-        messages.append("Missing required coordinate file: expected one of co-pdb or co-cif")
-
-    if experiment_type in {ExperimentType.XRAY, ExperimentType.NEUTRON}:
-        if not present.intersection(_SF_TYPES):
-            messages.append("Missing required structure factors file: expected one of xs-cif or xs-mtz")
-
-    if experiment_type == ExperimentType.FIBER and "layer-lines" not in present:
-        messages.append("Missing required fiber diffraction file: expected layer-lines")
-
-    if experiment_type == ExperimentType.EM:
-        if not em_subtype:
-            messages.append("Missing required EM subtype")
-        if "img-emdb" not in present:
-            messages.append("Missing required EM image file: expected img-emdb")
-        if "vo-map" not in present:
-            messages.append("Missing required EM map file: expected vo-map")
-        if em_subtype and em_subtype.value in _HALF_MAP_SUBTYPES and counts["half-map"] < 2:
-            messages.append("Missing required half-map files: expected 2 half-map files")
-
-    if experiment_type == ExperimentType.EC and not present.intersection(_EC_DATA_TYPES):
-        messages.append("Missing required EC data file: expected at least one of vo-map, xs-cif, or xs-mtz")
-
-    if experiment_type in {ExperimentType.NMR, ExperimentType.SSNMR}:
-        if not present.intersection(_NMR_UNIFIED_TYPES):
-            if "nm-shi" not in present:
-                messages.append("Missing required chemical shifts file: expected nm-shi")
-            if not present.intersection(_NMR_RESTRAINT_TYPES):
-                messages.append("Missing required NMR restraints file: expected at least one nm-res-* file")
-
-    return messages
-
 
 class CheckRunner:
+
+    subschemas: list[str] = ["xray", "neutron", "fiber", "em", "nmr", "ec", "ssnmr"]
+    validator_specification = jsonschema.Draft202012Validator
+    referencing_specification = DRAFT202012
+
     def __init__(self, schema_provider: SchemaProvider) -> None:
         self._schema_provider = schema_provider
 
@@ -95,6 +40,16 @@ class CheckRunner:
 
         try:
             schema = self._schema_provider.get_schema("required_files")
+            resources = [
+                (
+                    f"{name}.json",
+                    Resource(
+                        contents=self._schema_provider.get_schema(name),
+                        specification=CheckRunner.referencing_specification,
+                    ),
+                )
+                for name in CheckRunner.subschemas
+            ]
         except SchemaError as exc:
             return CheckReport(
                 source="session",
@@ -114,15 +69,19 @@ class CheckRunner:
         if em_subtype:
             data["subtype"] = em_subtype.value
 
-        validator = jsonschema.Draft202012Validator(schema)
+        registry = Registry().with_resources(resources)
+        validator = CheckRunner.validator_specification(schema, registry=registry)
         errors = list(validator.iter_errors(data))
         if not errors:
             return CheckReport(source="session")
 
-        filetypes = [file.file_type.value for file in files]
-        messages = _human_readable_messages(filetypes, experiment_type, em_subtype)
-        if not messages:
-            messages = [error.message for error in errors]
+        messages = []
+        for error in errors:
+            error_schema = error.schema
+            feedback = error_schema.get("feedback", {})
+            message = feedback.get(error.validator, None)
+            if message:
+                messages.append(message)
 
         return CheckReport(
             source="session",

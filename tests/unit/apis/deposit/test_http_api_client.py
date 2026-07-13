@@ -1,9 +1,13 @@
+import json
+
 import pytest
 from pytest_httpserver import HTTPServer
+from werkzeug.wrappers import Response
+
 from onedep_lib.apis.deposit.client import HttpApiClient
-from onedep_lib.apis.deposit.models import WwPDBDeposition, DepositedFile, DepositStatus
+from onedep_lib.apis.deposit.models import DepositedFile, DepositStatus, Experiment, WwPDBDeposition
+from onedep_lib.config import DepositConfig
 from onedep_lib.enums import Country, ExperimentType, FileType
-from onedep_lib.apis.deposit.models import Experiment
 from onedep_lib.exceptions import ApiError
 
 
@@ -48,6 +52,25 @@ _STATUS_RESPONSE = {
     "details": "deposited",
     "date": "2024-01-01T00:00:00",
 }
+
+
+def test_client_derives_api_base_from_site_root(api_config):
+    client = HttpApiClient(api_config)
+
+    assert client.site_base_url == api_config.hostname.rstrip("/")
+    assert client.api_base_url == f"{api_config.hostname.rstrip('/')}/api/v1/"
+
+
+def test_client_normalizes_accidental_api_base_url(api_config):
+    config = DepositConfig(
+        hostname=f"{api_config.hostname.rstrip('/')}/api/v1/",
+        ssl_verify=False,
+        redirect=True,
+    )
+    client = HttpApiClient(config)
+
+    assert client.site_base_url == api_config.hostname.rstrip("/")
+    assert client.api_base_url == f"{api_config.hostname.rstrip('/')}/api/v1/"
 
 
 def test_create_deposition(httpserver: HTTPServer, client: HttpApiClient):
@@ -108,13 +131,105 @@ def test_redirect_updates_base_url_and_retries(httpserver: HTTPServer, api_confi
     httpserver.expect_ordered_request("/api/v1/depositions/", method="GET").respond_with_json(
         {
             "code": "invalid_location",
-            "extras": {"base_url": correct_base},
+            "extras": {"base_url": f"{correct_base}/api/v1/"},
         }
     )
     httpserver.expect_ordered_request("/api/v1/depositions/", method="GET").respond_with_json({"items": []})
     client = HttpApiClient(api_config)
     result = client.get_all_depositions()
     assert result == []
+    assert client.site_base_url == correct_base
+    assert client.api_base_url == f"{correct_base}/api/v1/"
+
+
+def test_redirect_retry_malformed_redirect_raises_api_error(httpserver: HTTPServer, api_config):
+    correct_base = httpserver.url_for("").rstrip("/")
+    httpserver.expect_ordered_request("/api/v1/depositions/", method="GET").respond_with_json(
+        {
+            "code": "invalid_location",
+            "extras": {"base_url": f"{correct_base}/api/v1/"},
+        }
+    )
+    httpserver.expect_ordered_request("/api/v1/depositions/", method="GET").respond_with_json(
+        {"code": "invalid_location", "extras": {}}
+    )
+    client = HttpApiClient(api_config)
+
+    with pytest.raises(ApiError, match="missing base_url"):
+        client.get_all_depositions()
+
+
+def test_upload_file_redirect_normalizes_base_url(httpserver: HTTPServer, api_config, tmp_path):
+    test_file = tmp_path / "test.cif"
+    test_file.write_bytes(b"X" * 8)
+    correct_base = httpserver.url_for("").rstrip("/")
+
+    httpserver.expect_ordered_request(
+        "/api/v1/depositions/D_800001/files/",
+        method="POST",
+    ).respond_with_json(
+        {
+            "code": "invalid_location",
+            "extras": {"base_url": f"{correct_base}/api/v1/"},
+        }
+    )
+    httpserver.expect_ordered_request(
+        "/api/v1/depositions/D_800001/files/",
+        method="POST",
+    ).respond_with_json(
+        {**_FILE_RESPONSE, "uploadedBytes": 8}
+    )
+
+    client = HttpApiClient(api_config)
+    deposited = client.upload_file("D_800001", str(test_file), FileType.MMCIF_COORD, _chunk_size=8)
+
+    assert deposited.file_id == 1
+    assert client.site_base_url == correct_base
+    assert client.api_base_url == f"{correct_base}/api/v1/"
+
+
+def test_json_malformed_redirect_raises_api_error(httpserver: HTTPServer, client: HttpApiClient):
+    httpserver.expect_request("/api/v1/depositions/", method="GET").respond_with_json(
+        {"code": "invalid_location", "extras": {}}
+    )
+
+    with pytest.raises(ApiError, match="missing base_url"):
+        client.get_all_depositions()
+
+
+def test_upload_file_malformed_redirect_raises_api_error(httpserver: HTTPServer, client: HttpApiClient, tmp_path):
+    test_file = tmp_path / "test.cif"
+    test_file.write_bytes(b"X" * 8)
+    httpserver.expect_request("/api/v1/depositions/D_800001/files/", method="POST").respond_with_json(
+        {"code": "invalid_location", "extras": {"base_url": " "}}
+    )
+
+    with pytest.raises(ApiError, match="missing base_url"):
+        client.upload_file("D_800001", str(test_file), FileType.MMCIF_COORD, _chunk_size=8)
+
+
+def test_redirect_disabled_does_not_mutate_base_url(httpserver: HTTPServer, api_config):
+    original_site_base_url = api_config.hostname.rstrip("/")
+    redirected_site_base_url = "https://other.example.org/deposition"
+    redirected_base = f"{redirected_site_base_url}/api/v1/"
+    config = DepositConfig(
+        hostname=original_site_base_url,
+        ssl_verify=False,
+        redirect=False,
+    )
+    httpserver.expect_request("/api/v1/depositions/", method="GET").respond_with_json(
+        {
+            "code": "invalid_location",
+            "extras": {"base_url": redirected_base},
+        }
+    )
+    client = HttpApiClient(config)
+
+    with pytest.raises(ApiError, match=redirected_site_base_url):
+        client.get_all_depositions()
+
+    assert client.site_base_url == original_site_base_url
+    assert client.api_base_url == f"{original_site_base_url}/api/v1/"
 
 
 def test_204_returns_empty(httpserver: HTTPServer, client: HttpApiClient):
@@ -144,6 +259,45 @@ def test_upload_file_chunked_sends_content_range(httpserver: HTTPServer, client:
     deposited = client.upload_file("D_800001", str(test_file), FileType.MMCIF_COORD, _chunk_size=8)
     assert deposited.file_id == 1
     assert deposited.file_type is FileType.MMCIF_COORD
+
+
+def test_upload_file_seeks_to_server_uploaded_bytes(httpserver: HTTPServer, client: HttpApiClient, tmp_path):
+    test_file = tmp_path / "test.cif"
+    test_file.write_bytes(b"abcdefghijklmnopqrst")
+    uploaded_chunks = []
+
+    def uploaded_bytes_response(uploaded_bytes: int):
+        def handler(request):
+            uploaded_chunks.append(request.files["file"].read())
+            return Response(json.dumps({"uploadedBytes": uploaded_bytes}), content_type="application/json")
+
+        return handler
+
+    httpserver.expect_ordered_request(
+        "/api/v1/depositions/D_800001/files/",
+        method="POST",
+        headers={"Content-Range": "bytes 0-7/20"},
+    ).respond_with_handler(uploaded_bytes_response(4))
+    httpserver.expect_ordered_request(
+        "/api/v1/depositions/D_800001/files/",
+        method="POST",
+        headers={"Content-Range": "bytes 4-11/20"},
+    ).respond_with_handler(uploaded_bytes_response(12))
+    httpserver.expect_ordered_request(
+        "/api/v1/depositions/D_800001/files/",
+        method="POST",
+        headers={"Content-Range": "bytes 12-19/20"},
+    ).respond_with_handler(
+        lambda request: (
+            uploaded_chunks.append(request.files["file"].read())
+            or Response(json.dumps({**_FILE_RESPONSE, "uploadedBytes": 20}), content_type="application/json")
+        )
+    )
+
+    deposited = client.upload_file("D_800001", str(test_file), FileType.MMCIF_COORD, _chunk_size=8)
+
+    assert deposited.file_id == 1
+    assert uploaded_chunks == [b"abcdefgh", b"efghijkl", b"mnopqrst"]
 
 
 def test_upload_file_chunked_final_response_includes_uploaded_bytes(
@@ -181,3 +335,100 @@ def test_upload_file_resumes_from_uploaded_bytes(httpserver: HTTPServer, client:
     ).respond_with_json(_FILE_RESPONSE)
     deposited = client.upload_file("D_800001", str(test_file), FileType.MMCIF_COORD, uploaded_bytes=8, _chunk_size=8)
     assert deposited.file_id == 1
+
+
+class RedirectSwitchingAuthProvider:
+    def __init__(self) -> None:
+        self.token = "default-access"
+        self.activated_sites: list[str] = []
+
+    def get_access_token(self) -> str:
+        return self.token
+
+    def activate_site(self, site_base_url: str) -> str:
+        self.activated_sites.append(site_base_url)
+        self.token = "new-site-access"
+        return self.token
+
+
+def test_redirect_switches_auth_provider_before_retry(httpserver: HTTPServer, api_config):
+    correct_base = httpserver.url_for("").rstrip("/")
+    auth = RedirectSwitchingAuthProvider()
+    httpserver.expect_ordered_request(
+        "/api/v1/depositions/",
+        method="GET",
+        headers={"Authorization": "Bearer default-access"},
+    ).respond_with_json(
+        {
+            "code": "invalid_location",
+            "extras": {"base_url": f"{correct_base}/api/v1/"},
+        }
+    )
+    httpserver.expect_ordered_request(
+        "/api/v1/depositions/",
+        method="GET",
+        headers={"Authorization": "Bearer new-site-access"},
+    ).respond_with_json({"items": []})
+
+    client = HttpApiClient(api_config, auth_provider=auth)
+
+    assert client.get_all_depositions() == []
+    assert auth.activated_sites == [correct_base]
+
+
+class FailingRedirectAuthProvider(RedirectSwitchingAuthProvider):
+    def activate_site(self, site_base_url: str) -> str:
+        self.activated_sites.append(site_base_url)
+        raise RuntimeError("token exchange failed")
+
+
+def test_redirect_activation_failure_does_not_switch_base_url(httpserver: HTTPServer, api_config):
+    original_base = api_config.hostname.rstrip("/")
+    redirected_base = f"{original_base}/alternate-deposition"
+    auth = FailingRedirectAuthProvider()
+    httpserver.expect_request("/api/v1/depositions/", method="GET").respond_with_json(
+        {
+            "code": "invalid_location",
+            "extras": {"base_url": f"{redirected_base}/api/v1/"},
+        }
+    )
+    client = HttpApiClient(api_config, auth_provider=auth)
+
+    with pytest.raises(RuntimeError, match="token exchange failed"):
+        client.get_all_depositions()
+
+    assert client.site_base_url == original_base
+    assert auth.activated_sites == [redirected_base]
+
+
+def test_redirect_rejects_same_host_https_downgrade():
+    config = DepositConfig(hostname="https://deposit.wwpdb.org/deposition", redirect=True)
+    auth = RedirectSwitchingAuthProvider()
+    client = HttpApiClient(config, auth_provider=auth)
+
+    with pytest.raises(ApiError, match="not allowed"):
+        client._handle_redirect(
+            {
+                "code": "invalid_location",
+                "extras": {"base_url": "http://deposit.wwpdb.org/deposition/api/v1/"},
+            }
+        )
+
+    assert client.site_base_url == "https://deposit.wwpdb.org/deposition"
+    assert auth.activated_sites == []
+
+
+def test_redirect_rejects_untrusted_site_before_retry(httpserver: HTTPServer, api_config):
+    auth = RedirectSwitchingAuthProvider()
+    httpserver.expect_request("/api/v1/depositions/", method="GET").respond_with_json(
+        {
+            "code": "invalid_location",
+            "extras": {"base_url": "https://deposit.wwpdb.org.evil.example/deposition"},
+        }
+    )
+    client = HttpApiClient(api_config, auth_provider=auth)
+
+    with pytest.raises(ApiError, match="not allowed"):
+        client.get_all_depositions()
+
+    assert auth.activated_sites == []

@@ -32,6 +32,8 @@ def test_create_and_get_session(store: JsonSessionStore, session: LocalSession):
     assert loaded.email == session.email
     assert loaded.country == Country.USA
     assert loaded.experiment_type == ExperimentType.XRAY
+    assert loaded.site_base_url is None
+    assert loaded.site_url is None
 
 
 def test_get_session_raises_when_no_session(store: JsonSessionStore):
@@ -99,9 +101,29 @@ def test_update_experiment_type(store: JsonSessionStore, session: LocalSession):
 
 def test_set_remote_dep_id(store: JsonSessionStore, session: LocalSession):
     store.create_session(session)
-    store.set_remote_dep_id("D_8000000001")
+    store.set_remote_dep_id(
+        "D_8000000001",
+        site_base_url="https://deposit-pdbe.wwpdb.org/deposition",
+        site_url="https://deposit-pdbe.wwpdb.org/deposition/api/v1/depositions/D_8000000001/view",
+    )
     loaded = store.get_session()
     assert loaded.remote_dep_id == "D_8000000001"
+    assert loaded.site_base_url == "https://deposit-pdbe.wwpdb.org/deposition"
+    assert (
+        loaded.site_url
+        == "https://deposit-pdbe.wwpdb.org/deposition/api/v1/depositions/D_8000000001/view"
+    )
+
+
+def test_set_remote_dep_id_positional_site_url_is_compatible(
+    store: JsonSessionStore, session: LocalSession
+):
+    store.create_session(session)
+    store.set_remote_dep_id("D_8000000001", "view-url")
+    loaded = store.get_session()
+    assert loaded.remote_dep_id == "D_8000000001"
+    assert loaded.site_url == "view-url"
+    assert loaded.site_base_url is None
 
 
 def test_persists_across_store_instances(tmp_path: Path, session: LocalSession):

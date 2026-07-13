@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import ClassVar, Union
+from typing import ClassVar
 
 from onedep_lib.apis.deposit.enums import Status
 from onedep_lib.enums import EMSubType, ExperimentType, FileType
@@ -103,6 +103,7 @@ class WwPDBDeposition:
     experiments: list[Experiment] = field(default_factory=list)
     errors: list[DepositError] = field(default_factory=list)
     site_url: str | None = None
+    site_base_url: str | None = None
 
     def __post_init__(self) -> None:
         self.dep_id = str(self.dep_id)

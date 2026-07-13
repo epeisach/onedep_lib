@@ -56,8 +56,6 @@ docs = [
 [project.urls]
 homepage = "https://github.com/wwPDB/onedep_lib"
 
-[project.scripts]
-onedep_lib = "onedep_lib.cli:app"
 
 [tool.ty]
 # All rules are enabled as "error" by default; no need to specify unless overriding.
