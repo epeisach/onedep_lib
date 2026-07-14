@@ -10,7 +10,12 @@ from onedep_lib.auths.types import AuthProvider
 from onedep_lib.checks.report import CheckIssue, CheckReport, CheckSeverity, CifLocation
 from onedep_lib.dsp import Deposition, check_auth_key, deposit_init, deposit_resume, list_sessions
 from onedep_lib.enums import Country, EMSubType, ExperimentType, FileType
-from onedep_lib.exceptions import ApiError, DepositApiException, OneDepError
+from onedep_lib.exceptions import (
+    ApiError,
+    ApiUnreachableError,
+    DepositApiException,
+    OneDepError,
+)
 
 # Library logging is opt-in: a NullHandler on the top-level logger means nothing
 # is emitted unless the embedding application configures a handler for it.
@@ -40,6 +45,7 @@ __all__ = [
     # exceptions
     "OneDepError",
     "ApiError",
+    "ApiUnreachableError",
     "DepositApiException",
     # auth
     "TokenStore",
