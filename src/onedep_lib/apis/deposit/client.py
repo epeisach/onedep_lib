@@ -21,7 +21,7 @@ from onedep_lib.apis.deposit.models import (
 from onedep_lib.auths.types import AuthProvider
 from onedep_lib.config import DepositConfig
 from onedep_lib.enums import Country, FileType
-from onedep_lib.exceptions import ApiError
+from onedep_lib.exceptions import ApiError, ApiUnreachableError
 
 _API_SUFFIX_RE = re.compile(r"/api/v[0-9]+/?$")
 
@@ -164,7 +164,7 @@ class HttpApiClient:
             )
         except requests.exceptions.RequestException as e:
             self._logger.error(str(e))
-            raise ApiError("Failed to access the API", 403) from e
+            raise ApiUnreachableError() from e
 
         data_out = self._check_response(response)
 
@@ -182,7 +182,7 @@ class HttpApiClient:
                     timeout=300,
                 )
             except requests.exceptions.RequestException as e:
-                raise ApiError("Retry after redirect failed", 503) from e
+                raise ApiUnreachableError("Retry after redirect failed") from e
             data_out = self._check_response(response)
             if isinstance(data_out, dict):
                 retry_site_base_url = self._redirect_site_base_url(data_out)
@@ -307,7 +307,7 @@ class HttpApiClient:
                         timeout=300,
                     )
                 except requests.exceptions.RequestException as e:
-                    raise ApiError("Failed to access the API", 403) from e
+                    raise ApiUnreachableError() from e
 
                 data_out = self._check_response(response)
 

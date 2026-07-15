@@ -140,7 +140,7 @@ class TokenStore:
         except requests.RequestException as exc:
             raise AuthError(f"Token {operation} failed: {exc}") from exc
 
-        if response.status_code == 401:
+        if response.status_code in (401, 403):
             raise AuthError("Refresh token is expired, revoked, or invalid; generate and paste a new token pair.")
 
         try:

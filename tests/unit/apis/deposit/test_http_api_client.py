@@ -1,6 +1,7 @@
 import json
 
 import pytest
+import requests
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers import Response
 
@@ -8,7 +9,7 @@ from onedep_lib.apis.deposit.client import HttpApiClient
 from onedep_lib.apis.deposit.models import DepositedFile, DepositStatus, Experiment, WwPDBDeposition
 from onedep_lib.config import DepositConfig
 from onedep_lib.enums import Country, ExperimentType, FileType
-from onedep_lib.exceptions import ApiError
+from onedep_lib.exceptions import ApiError, ApiUnreachableError
 
 
 class StubAuthProvider:
@@ -124,6 +125,35 @@ def test_non_2xx_raises_api_error(httpserver: HTTPServer, client: HttpApiClient)
     httpserver.expect_request("/api/v1/depositions/D_999/status").respond_with_data("Not Found", status=404)
     with pytest.raises(ApiError):
         client.get_status("D_999")
+
+
+def test_unreachable_api_raises_api_unreachable_error():
+    # Port 1 on loopback: nothing listens, so requests fails at the transport
+    # layer and no HTTP response ever exists.
+    config = DepositConfig(hostname="http://127.0.0.1:1", ssl_verify=False, redirect=True)
+    client = HttpApiClient(config)
+    with pytest.raises(ApiUnreachableError) as excinfo:
+        client.get_all_depositions()
+    assert excinfo.value.status_code is None
+    # The underlying transport failure stays attached for diagnosis.
+    assert isinstance(excinfo.value.__cause__, requests.exceptions.RequestException)
+
+
+def test_unreachable_api_is_not_reported_as_an_auth_failure(httpserver: HTTPServer, client: HttpApiClient):
+    # A genuine 403 from the server and an unreachable server must not look the
+    # same: callers use this to tell "your token was rejected" from "we could
+    # not reach OneDep", and telling a user their credentials are bad because
+    # their wifi is off is worse than saying nothing.
+    httpserver.expect_request("/api/v1/depositions/").respond_with_data("Forbidden", status=403)
+    with pytest.raises(ApiError) as denied:
+        client.get_all_depositions()
+    assert denied.value.status_code == 403
+    assert not isinstance(denied.value, ApiUnreachableError)
+
+    offline = HttpApiClient(DepositConfig(hostname="http://127.0.0.1:1", ssl_verify=False, redirect=True))
+    with pytest.raises(ApiUnreachableError) as unreachable:
+        offline.get_all_depositions()
+    assert unreachable.value.status_code is None
 
 
 def test_redirect_updates_base_url_and_retries(httpserver: HTTPServer, api_config):
