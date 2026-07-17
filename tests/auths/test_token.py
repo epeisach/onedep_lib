@@ -9,7 +9,7 @@ import pytest
 
 from onedep_lib.auths.token import TokenStore
 from onedep_lib.config import DepositConfig
-from onedep_lib.exceptions import AuthError
+from onedep_lib.exceptions import ApiError, ApiUnreachableError, AuthError
 
 
 def _make_jwt(exp_offset: int = 3600) -> str:
@@ -169,6 +169,90 @@ def test_refresh_401_explains_manual_token_required(tmp_path: Path, httpserver):
     httpserver.expect_request("/deposition/auth/tokens/refresh", method="POST").respond_with_data(status=401)
     with pytest.raises(AuthError, match="generate and paste a new token pair"):
         store.refresh()
+
+
+def _offline_store(tmp_path: Path) -> TokenStore:
+    """A store whose endpoints are on a closed port: nothing listens, so requests
+    fails at the transport layer and no HTTP response ever exists."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("[default]\n")
+    store = TokenStore(
+        config=DepositConfig(
+            hostname="http://127.0.0.1:1/deposition",
+            ssl_verify=False,
+            config_path=config_file,
+        ),
+    )
+    store.store_tokens(_make_jwt(-60), "refresh")
+    return store
+
+
+def _server_store(tmp_path: Path, httpserver) -> TokenStore:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("[default]\n")
+    store = TokenStore(
+        config=DepositConfig(
+            hostname=httpserver.url_for("/deposition").rstrip("/"),
+            ssl_verify=False,
+            config_path=config_file,
+        ),
+    )
+    store.store_tokens(_make_jwt(-60), "refresh")
+    return store
+
+
+def test_refresh_unreachable_is_not_an_auth_failure(tmp_path: Path):
+    # Being offline says nothing about the token. Reporting it as AuthError sends
+    # the depositor off to re-issue a refresh token that was never the problem.
+    store = _offline_store(tmp_path)
+    with pytest.raises(ApiUnreachableError) as excinfo:
+        store.refresh()
+    assert excinfo.value.status_code is None
+    assert not isinstance(excinfo.value, AuthError)
+
+
+def test_refresh_server_error_is_not_an_auth_failure(tmp_path: Path, httpserver):
+    # A 502 during an outage is not a rejected token either.
+    store = _server_store(tmp_path, httpserver)
+    httpserver.expect_request("/deposition/auth/tokens/refresh", method="POST").respond_with_data(status=502)
+    with pytest.raises(ApiError) as excinfo:
+        store.refresh()
+    assert excinfo.value.status_code == 502
+    assert not isinstance(excinfo.value, AuthError)
+
+
+def test_refresh_malformed_body_is_not_an_auth_failure(tmp_path: Path, httpserver):
+    store = _server_store(tmp_path, httpserver)
+    httpserver.expect_request("/deposition/auth/tokens/refresh", method="POST").respond_with_json({"nonsense": 1})
+    with pytest.raises(ApiError) as excinfo:
+        store.refresh()
+    assert not isinstance(excinfo.value, AuthError)
+
+
+def test_revoke_unreachable_is_not_an_auth_failure(tmp_path: Path):
+    store = _offline_store(tmp_path)
+    store.store_tokens(_make_jwt(3600), "refresh")  # fresh: revoke reaches its own POST
+    with pytest.raises(ApiUnreachableError) as excinfo:
+        store.revoke()
+    assert excinfo.value.status_code is None
+
+
+def test_revoke_server_error_reports_the_status(tmp_path: Path, httpserver):
+    store = _server_store(tmp_path, httpserver)
+    store.store_tokens(_make_jwt(3600), "refresh")
+    httpserver.expect_request("/deposition/auth/tokens/revoke", method="POST").respond_with_data(status=500)
+    with pytest.raises(ApiError) as excinfo:
+        store.revoke()
+    assert excinfo.value.status_code == 500
+    assert not isinstance(excinfo.value, AuthError)
+
+
+def test_revoke_rejected_is_an_auth_failure(tmp_path: Path, httpserver):
+    store = _server_store(tmp_path, httpserver)
+    store.store_tokens(_make_jwt(3600), "refresh")
+    httpserver.expect_request("/deposition/auth/tokens/revoke", method="POST").respond_with_data(status=403)
+    with pytest.raises(AuthError, match="rejected"):
+        store.revoke()
 
 
 def test_revoke_posts_refresh_token_and_clears_local_storage(tmp_path: Path, httpserver):

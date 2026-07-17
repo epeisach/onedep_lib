@@ -7,7 +7,7 @@ import jwt as pyjwt
 import requests
 
 from onedep_lib.config import DepositConfig, _hostname_to_fqdn_key
-from onedep_lib.exceptions import AuthError, ConfigError
+from onedep_lib.exceptions import ApiError, ApiUnreachableError, AuthError, ConfigError
 
 _REFRESH_PATH = "auth/tokens/refresh"
 _EXCHANGE_PATH = "auth/tokens/exchange"
@@ -68,10 +68,12 @@ class TokenStore:
                 timeout=30,
             )
         except requests.RequestException as exc:
-            raise AuthError(f"Token revoke failed: {exc}") from exc
+            raise ApiUnreachableError(f"Token revoke failed: {exc}") from exc
 
+        if response.status_code in (401, 403):
+            raise AuthError("Token revoke was rejected; credentials are expired, revoked, or invalid.")
         if response.status_code != 204:
-            raise AuthError(f"Token revoke failed with status {response.status_code}")
+            raise ApiError(f"Token revoke failed with status {response.status_code}", response.status_code)
         self.clear_tokens()
 
     def clear_tokens(self) -> None:
@@ -138,7 +140,7 @@ class TokenStore:
                 timeout=30,
             )
         except requests.RequestException as exc:
-            raise AuthError(f"Token {operation} failed: {exc}") from exc
+            raise ApiUnreachableError(f"Token {operation} failed: {exc}") from exc
 
         if response.status_code in (401, 403):
             raise AuthError("Refresh token is expired, revoked, or invalid; generate and paste a new token pair.")
@@ -147,12 +149,15 @@ class TokenStore:
             response.raise_for_status()
             body = response.json()
         except Exception as exc:
-            raise AuthError(f"Token {operation} failed: {exc}") from exc
+            raise ApiError(f"Token {operation} failed: {exc}", response.status_code) from exc
 
         access_token = body.get("access_token")
         refresh_token_out = body.get("refresh_token")
         if not isinstance(access_token, str) or not isinstance(refresh_token_out, str):
-            raise AuthError(f"Token {operation} response missing access_token or refresh_token")
+            raise ApiError(
+                f"Token {operation} response missing access_token or refresh_token",
+                response.status_code,
+            )
         return access_token, refresh_token_out
 
     def _read_entry(self) -> dict[str, str]:
