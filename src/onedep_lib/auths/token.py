@@ -44,7 +44,7 @@ class TokenStore:
     def activate_site(self, site_base_url: str) -> str:
         key = _hostname_to_fqdn_key(site_base_url)
         if not key:
-            raise AuthError(f"Invalid hostname for token storage: {site_base_url!r}")
+            raise ConfigError(f"Invalid hostname for token storage: {site_base_url!r}")
         self._entries = self._load_auth_entries() | self._entries
         entry = self._entries.get(key)
         if entry is None:
@@ -79,26 +79,20 @@ class TokenStore:
     def clear_tokens(self) -> None:
         self._config.access_token = None
         self._config.refresh_token = None
-        try:
-            key = self._fqdn_key()
-            self._config.delete_auth_entry(key)
-            self._entries.pop(key, None)
-        except ConfigError as exc:
-            raise AuthError(str(exc)) from exc
+        key = self._fqdn_key()
+        self._config.delete_auth_entry(key)
+        self._entries.pop(key, None)
 
     def _load_auth_entries(self) -> dict[str, dict[str, str]]:
-        try:
-            raw_entries = self._config.read_auth_entries()
-        except ConfigError as exc:
-            raise AuthError(str(exc)) from exc
+        raw_entries = self._config.read_auth_entries()
         entries: dict[str, dict[str, str]] = {}
         for key, entry in raw_entries.items():
             access_token = entry.get("access_token")
             refresh_token = entry.get("refresh_token")
             if access_token is not None and not isinstance(access_token, str):
-                raise AuthError(f"Malformed token data in [auths.{key}]")
+                raise ConfigError(f"Malformed token data in [auths.{key}]")
             if refresh_token is not None and not isinstance(refresh_token, str):
-                raise AuthError(f"Malformed token data in [auths.{key}]")
+                raise ConfigError(f"Malformed token data in [auths.{key}]")
             if refresh_token is None:
                 continue
             values = {"refresh_token": refresh_token}
@@ -108,13 +102,10 @@ class TokenStore:
         return entries
 
     def _store_tokens_for_key(self, key: str, access_token: str, refresh_token: str) -> None:
-        try:
-            self._config.write_auth_entry(
-                key,
-                {"access_token": access_token, "refresh_token": refresh_token},
-            )
-        except ConfigError as exc:
-            raise AuthError(str(exc)) from exc
+        self._config.write_auth_entry(
+            key,
+            {"access_token": access_token, "refresh_token": refresh_token},
+        )
         self._entries[key] = {"access_token": access_token, "refresh_token": refresh_token}
         self._config.access_token = access_token
         self._config.refresh_token = refresh_token
@@ -194,7 +185,7 @@ class TokenStore:
     def _fqdn_key(self) -> str:
         key = _hostname_to_fqdn_key(self._config.hostname)
         if not key:
-            raise AuthError(f"Invalid hostname for token storage: {self._config.hostname!r}")
+            raise ConfigError(f"Invalid hostname for token storage: {self._config.hostname!r}")
         return key
 
     def _url(self, path: str) -> str:

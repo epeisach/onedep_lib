@@ -9,7 +9,7 @@ import pytest
 
 from onedep_lib.auths.token import TokenStore
 from onedep_lib.config import DepositConfig
-from onedep_lib.exceptions import ApiError, ApiUnreachableError, AuthError
+from onedep_lib.exceptions import ApiError, ApiUnreachableError, AuthError, ConfigError
 
 
 def _make_jwt(exp_offset: int = 3600) -> str:
@@ -253,6 +253,40 @@ def test_revoke_rejected_is_an_auth_failure(tmp_path: Path, httpserver):
     httpserver.expect_request("/deposition/auth/tokens/revoke", method="POST").respond_with_data(status=403)
     with pytest.raises(AuthError, match="rejected"):
         store.revoke()
+
+
+def test_unwritable_config_is_not_an_auth_failure(tmp_path: Path, httpserver):
+    # The server accepts the refresh token; only the local write fails. Reporting
+    # that as AuthError tells the depositor to re-issue a token that was just
+    # validated.
+    store = _server_store(tmp_path, httpserver)
+    httpserver.expect_request("/deposition/auth/tokens/refresh", method="POST").respond_with_json(
+        {"access_token": _make_jwt(3600), "refresh_token": "rotated"}
+    )
+    read_only = tmp_path / "read_only"
+    read_only.mkdir()
+    read_only.chmod(0o500)
+    store._config.config_path = read_only / "config.toml"
+    try:
+        with pytest.raises(ConfigError) as excinfo:
+            store.refresh()
+    finally:
+        read_only.chmod(0o700)
+    assert not isinstance(excinfo.value, AuthError)
+
+
+def test_malformed_auths_entry_is_a_config_error(tmp_path: Path):
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('[default]\n\n[auths.example_org]\nrefresh_token = 42\n')
+    with pytest.raises(ConfigError, match="Malformed token data"):
+        TokenStore(config=DepositConfig(hostname="https://example.org", config_path=config_file))
+
+
+def test_invalid_hostname_is_a_config_error(tmp_path: Path):
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("[default]\n")
+    with pytest.raises(ConfigError, match="Invalid hostname"):
+        TokenStore(config=DepositConfig(hostname="", config_path=config_file))
 
 
 def test_revoke_posts_refresh_token_and_clears_local_storage(tmp_path: Path, httpserver):
