@@ -9,7 +9,7 @@ import pytest
 
 from onedep_lib.auths.token import TokenStore
 from onedep_lib.config import DepositConfig
-from onedep_lib.exceptions import AuthError
+from onedep_lib.exceptions import ApiError, ApiUnreachableError, AuthError, ConfigError
 
 
 def _make_jwt(exp_offset: int = 3600) -> str:
@@ -171,6 +171,124 @@ def test_refresh_401_explains_manual_token_required(tmp_path: Path, httpserver):
         store.refresh()
 
 
+def _offline_store(tmp_path: Path) -> TokenStore:
+    """A store whose endpoints are on a closed port: nothing listens, so requests
+    fails at the transport layer and no HTTP response ever exists."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("[default]\n")
+    store = TokenStore(
+        config=DepositConfig(
+            hostname="http://127.0.0.1:1/deposition",
+            ssl_verify=False,
+            config_path=config_file,
+        ),
+    )
+    store.store_tokens(_make_jwt(-60), "refresh")
+    return store
+
+
+def _server_store(tmp_path: Path, httpserver) -> TokenStore:
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("[default]\n")
+    store = TokenStore(
+        config=DepositConfig(
+            hostname=httpserver.url_for("/deposition").rstrip("/"),
+            ssl_verify=False,
+            config_path=config_file,
+        ),
+    )
+    store.store_tokens(_make_jwt(-60), "refresh")
+    return store
+
+
+def test_refresh_unreachable_is_not_an_auth_failure(tmp_path: Path):
+    # Being offline says nothing about the token. Reporting it as AuthError sends
+    # the depositor off to re-issue a refresh token that was never the problem.
+    store = _offline_store(tmp_path)
+    with pytest.raises(ApiUnreachableError) as excinfo:
+        store.refresh()
+    assert excinfo.value.status_code is None
+    assert not isinstance(excinfo.value, AuthError)
+
+
+def test_refresh_server_error_is_not_an_auth_failure(tmp_path: Path, httpserver):
+    # A 502 during an outage is not a rejected token either.
+    store = _server_store(tmp_path, httpserver)
+    httpserver.expect_request("/deposition/auth/tokens/refresh", method="POST").respond_with_data(status=502)
+    with pytest.raises(ApiError) as excinfo:
+        store.refresh()
+    assert excinfo.value.status_code == 502
+    assert not isinstance(excinfo.value, AuthError)
+
+
+def test_refresh_malformed_body_is_not_an_auth_failure(tmp_path: Path, httpserver):
+    store = _server_store(tmp_path, httpserver)
+    httpserver.expect_request("/deposition/auth/tokens/refresh", method="POST").respond_with_json({"nonsense": 1})
+    with pytest.raises(ApiError) as excinfo:
+        store.refresh()
+    assert not isinstance(excinfo.value, AuthError)
+
+
+def test_revoke_unreachable_is_not_an_auth_failure(tmp_path: Path):
+    store = _offline_store(tmp_path)
+    store.store_tokens(_make_jwt(3600), "refresh")  # fresh: revoke reaches its own POST
+    with pytest.raises(ApiUnreachableError) as excinfo:
+        store.revoke()
+    assert excinfo.value.status_code is None
+
+
+def test_revoke_server_error_reports_the_status(tmp_path: Path, httpserver):
+    store = _server_store(tmp_path, httpserver)
+    store.store_tokens(_make_jwt(3600), "refresh")
+    httpserver.expect_request("/deposition/auth/tokens/revoke", method="POST").respond_with_data(status=500)
+    with pytest.raises(ApiError) as excinfo:
+        store.revoke()
+    assert excinfo.value.status_code == 500
+    assert not isinstance(excinfo.value, AuthError)
+
+
+def test_revoke_rejected_is_an_auth_failure(tmp_path: Path, httpserver):
+    store = _server_store(tmp_path, httpserver)
+    store.store_tokens(_make_jwt(3600), "refresh")
+    httpserver.expect_request("/deposition/auth/tokens/revoke", method="POST").respond_with_data(status=403)
+    with pytest.raises(AuthError, match="rejected"):
+        store.revoke()
+
+
+def test_unwritable_config_is_not_an_auth_failure(tmp_path: Path, httpserver):
+    # The server accepts the refresh token; only the local write fails. Reporting
+    # that as AuthError tells the depositor to re-issue a token that was just
+    # validated.
+    store = _server_store(tmp_path, httpserver)
+    httpserver.expect_request("/deposition/auth/tokens/refresh", method="POST").respond_with_json(
+        {"access_token": _make_jwt(3600), "refresh_token": "rotated"}
+    )
+    read_only = tmp_path / "read_only"
+    read_only.mkdir()
+    read_only.chmod(0o500)
+    store._config.config_path = read_only / "config.toml"
+    try:
+        with pytest.raises(ConfigError) as excinfo:
+            store.refresh()
+    finally:
+        read_only.chmod(0o700)
+    assert not isinstance(excinfo.value, AuthError)
+
+
+def test_malformed_auths_entry_is_a_config_error(tmp_path: Path):
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('[default]\n\n[auths.example_org]\nrefresh_token = 42\n')
+    with pytest.raises(ConfigError, match="Malformed token data"):
+        TokenStore(config=DepositConfig(hostname="https://example.org", config_path=config_file))
+
+
+def test_invalid_hostname_is_a_config_error(tmp_path: Path):
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("[default]\n")
+    with pytest.raises(ConfigError, match="Invalid hostname"):
+        TokenStore(config=DepositConfig(hostname="", config_path=config_file))
+
+
 def test_revoke_posts_refresh_token_and_clears_local_storage(tmp_path: Path, httpserver):
     config_file = tmp_path / "config.toml"
     config_file.write_text("[default]\n")
@@ -201,6 +319,30 @@ def test_get_access_token_raises_auth_error_when_no_tokens_loaded(config: Deposi
         store.get_access_token()
 
 
+def _make_jwt_exp(exp_value) -> str:
+    """A JWT carrying an arbitrary `exp` claim value (int, float, or omitted)."""
+    header = base64.urlsafe_b64encode(b'{"alg":"HS256"}').rstrip(b"=").decode()
+    claim = {} if exp_value is None else {"exp": exp_value}
+    body = base64.urlsafe_b64encode(json.dumps(claim).encode()).rstrip(b"=").decode()
+    return f"{header}.{body}."
+
+
+def test_is_expired_accepts_float_exp_in_future(config: DepositConfig):
+    store = TokenStore(config)
+    future_float = float(int(time.time()) + 3600) + 0.5
+    assert store._is_expired(_make_jwt_exp(future_float)) is False
+
+
+def test_is_expired_true_for_past_float_exp(config: DepositConfig):
+    store = TokenStore(config)
+    assert store._is_expired(_make_jwt_exp(float(int(time.time()) - 60))) is True
+
+
+def test_is_expired_true_when_exp_missing(config: DepositConfig):
+    store = TokenStore(config)
+    assert store._is_expired(_make_jwt_exp(None)) is True
+    
+    
 class _TokenResponse:
     status_code = 200
 

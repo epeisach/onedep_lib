@@ -20,3 +20,12 @@ def test_em_subtypes_have_expected_values():
 
 def test_country_usa():
     assert Country.USA.value == "United States"
+
+
+def test_country_values_match_server_accepted_list():
+    # The deposit server's country list is ASCII-only (lowercased), so these
+    # values must not contain accented characters.
+    assert Country.CURACAO.value == "Curacao"
+    assert Country.IVORY_COAST.value == "Cote D'Ivoire"
+    assert Country.REUNION.value == "Reunion"
+    assert Country.SAINT_BARTHELEMY.value == "Saint Barthelemy"

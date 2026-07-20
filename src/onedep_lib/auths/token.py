@@ -7,7 +7,7 @@ import jwt as pyjwt
 import requests
 
 from onedep_lib.config import DepositConfig, _hostname_to_fqdn_key
-from onedep_lib.exceptions import AuthError, ConfigError
+from onedep_lib.exceptions import ApiError, ApiUnreachableError, AuthError, ConfigError
 
 _REFRESH_PATH = "auth/tokens/refresh"
 _EXCHANGE_PATH = "auth/tokens/exchange"
@@ -44,7 +44,7 @@ class TokenStore:
     def activate_site(self, site_base_url: str) -> str:
         key = _hostname_to_fqdn_key(site_base_url)
         if not key:
-            raise AuthError(f"Invalid hostname for token storage: {site_base_url!r}")
+            raise ConfigError(f"Invalid hostname for token storage: {site_base_url!r}")
         self._entries = self._load_auth_entries() | self._entries
         entry = self._entries.get(key)
         if entry is None:
@@ -68,35 +68,31 @@ class TokenStore:
                 timeout=30,
             )
         except requests.RequestException as exc:
-            raise AuthError(f"Token revoke failed: {exc}") from exc
+            raise ApiUnreachableError(f"Token revoke failed: {exc}") from exc
 
+        if response.status_code in (401, 403):
+            raise AuthError("Token revoke was rejected; credentials are expired, revoked, or invalid.")
         if response.status_code != 204:
-            raise AuthError(f"Token revoke failed with status {response.status_code}")
+            raise ApiError(f"Token revoke failed with status {response.status_code}", response.status_code)
         self.clear_tokens()
 
     def clear_tokens(self) -> None:
         self._config.access_token = None
         self._config.refresh_token = None
-        try:
-            key = self._fqdn_key()
-            self._config.delete_auth_entry(key)
-            self._entries.pop(key, None)
-        except ConfigError as exc:
-            raise AuthError(str(exc)) from exc
+        key = self._fqdn_key()
+        self._config.delete_auth_entry(key)
+        self._entries.pop(key, None)
 
     def _load_auth_entries(self) -> dict[str, dict[str, str]]:
-        try:
-            raw_entries = self._config.read_auth_entries()
-        except ConfigError as exc:
-            raise AuthError(str(exc)) from exc
+        raw_entries = self._config.read_auth_entries()
         entries: dict[str, dict[str, str]] = {}
         for key, entry in raw_entries.items():
             access_token = entry.get("access_token")
             refresh_token = entry.get("refresh_token")
             if access_token is not None and not isinstance(access_token, str):
-                raise AuthError(f"Malformed token data in [auths.{key}]")
+                raise ConfigError(f"Malformed token data in [auths.{key}]")
             if refresh_token is not None and not isinstance(refresh_token, str):
-                raise AuthError(f"Malformed token data in [auths.{key}]")
+                raise ConfigError(f"Malformed token data in [auths.{key}]")
             if refresh_token is None:
                 continue
             values = {"refresh_token": refresh_token}
@@ -106,13 +102,10 @@ class TokenStore:
         return entries
 
     def _store_tokens_for_key(self, key: str, access_token: str, refresh_token: str) -> None:
-        try:
-            self._config.write_auth_entry(
-                key,
-                {"access_token": access_token, "refresh_token": refresh_token},
-            )
-        except ConfigError as exc:
-            raise AuthError(str(exc)) from exc
+        self._config.write_auth_entry(
+            key,
+            {"access_token": access_token, "refresh_token": refresh_token},
+        )
         self._entries[key] = {"access_token": access_token, "refresh_token": refresh_token}
         self._config.access_token = access_token
         self._config.refresh_token = refresh_token
@@ -138,21 +131,24 @@ class TokenStore:
                 timeout=30,
             )
         except requests.RequestException as exc:
-            raise AuthError(f"Token {operation} failed: {exc}") from exc
+            raise ApiUnreachableError(f"Token {operation} failed: {exc}") from exc
 
-        if response.status_code == 401:
+        if response.status_code in (401, 403):
             raise AuthError("Refresh token is expired, revoked, or invalid; generate and paste a new token pair.")
 
         try:
             response.raise_for_status()
             body = response.json()
         except Exception as exc:
-            raise AuthError(f"Token {operation} failed: {exc}") from exc
+            raise ApiError(f"Token {operation} failed: {exc}", response.status_code) from exc
 
         access_token = body.get("access_token")
         refresh_token_out = body.get("refresh_token")
         if not isinstance(access_token, str) or not isinstance(refresh_token_out, str):
-            raise AuthError(f"Token {operation} response missing access_token or refresh_token")
+            raise ApiError(
+                f"Token {operation} response missing access_token or refresh_token",
+                response.status_code,
+            )
         return access_token, refresh_token_out
 
     def _read_entry(self) -> dict[str, str]:
@@ -189,7 +185,7 @@ class TokenStore:
     def _fqdn_key(self) -> str:
         key = _hostname_to_fqdn_key(self._config.hostname)
         if not key:
-            raise AuthError(f"Invalid hostname for token storage: {self._config.hostname!r}")
+            raise ConfigError(f"Invalid hostname for token storage: {self._config.hostname!r}")
         return key
 
     def _url(self, path: str) -> str:
@@ -207,6 +203,6 @@ class TokenStore:
                 algorithms=["HS256", "RS256", "none"],
             )
             exp = payload.get("exp")
-            return not isinstance(exp, int) or exp < time.time() + 60
+            return exp is None or not isinstance(exp, (int, float)) or exp < time.time() + 60
         except Exception:
             return True
